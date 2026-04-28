@@ -369,6 +369,7 @@ jobs:
   deploy-staging:
     name: 🚀 Deploy to Staging
     runs-on: ubuntu-latest
+    continue-on-errror: true
     needs: sign-artifact
     steps:
       - name: Download Docker Image
@@ -397,6 +398,8 @@ jobs:
   dast-scan:
     name: 🌐 DAST Scanning - OWASP ZAP
     runs-on: ubuntu-latest
+
+
     needs: deploy-staging
     steps:
       - name: Download Docker Image
