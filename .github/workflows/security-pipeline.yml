@@ -369,7 +369,7 @@ jobs:
   deploy-staging:
     name: 🚀 Deploy to Staging
     runs-on: ubuntu-latest
-    continue-on-errror: true
+    continue-on-error: true
     needs: sign-artifact
     steps:
       - name: Download Docker Image
