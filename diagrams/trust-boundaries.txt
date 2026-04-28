@@ -1,0 +1,106 @@
+═══════════════════════════════════════════════════════════════
+        DevSecOps Pipeline — Trust Boundary Diagram
+═══════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────┐
+│                    TRUST ZONE 1                             │
+│                  Developer Machine                          │
+│                                                             │
+│   [Developer writes code]                                   │
+│   [Runs local tests]                                        │
+│   [git commit & push]                                       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              ◄────────────┼────────────►
+              TRUST BOUNDARY 1 (SSH/HTTPS)
+              Threat: Stolen credentials
+              Mitigation: SSH keys + MFA
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    TRUST ZONE 2                             │
+│                  GitHub Repository                          │
+│                                                             │
+│   [Source code stored]                                      │
+│   [Branch protection rules]                                 │
+│   [Audit logs]                                              │
+│                                                             │
+│   🔑 GITLEAKS scans here → Finds secrets in code           │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              ◄────────────┼────────────►
+              TRUST BOUNDARY 2 (GitHub API)
+              Threat: Malicious pipeline injection
+              Mitigation: Signed commits + protected branches
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    TRUST ZONE 3                             │
+│               GitHub Actions Runner                         │
+│                                                             │
+│   [Pipeline executes here]                                  │
+│   [Isolated sandbox environment]                            │
+│   [Ephemeral — destroyed after run]                         │
+│                                                             │
+│   🔍 SEMGREP scans source code here                        │
+│   📦 OSV-SCANNER checks dependencies here                  │
+│   🐳 DOCKER BUILD happens here                             │
+│   🛡️ TRIVY scans container here                            │
+│   🔏 COSIGN signs artifact here                            │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              ◄────────────┼────────────►
+              TRUST BOUNDARY 3 (Registry Push)
+              Threat: Image tampering/substitution
+              Mitigation: Cosign signature verification
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    TRUST ZONE 4                             │
+│               Artifact Registry                             │
+│               (Docker Images)                               │
+│                                                             │
+│   [Signed Docker images stored]                             │
+│   [Image digests recorded]                                  │
+│   [Pull policies enforced]                                  │
+│                                                             │
+│   🔏 COSIGN verifies signatures here                       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              ◄────────────┼────────────►
+              TRUST BOUNDARY 4 (Deployment)
+              Threat: Unsigned/tampered image deployed
+              Mitigation: Signature verification before deploy
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    TRUST ZONE 5                             │
+│                 Staging/Production                          │
+│                                                             │
+│   [Container runs here]                                     │
+│   [App accessible on port 5000]                             │
+│   [Health checks running]                                   │
+│                                                             │
+│   🌐 OWASP ZAP attacks app from outside here              │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+              ◄────────────┼────────────►
+              TRUST BOUNDARY 5 (Public Internet)
+              Threat: External attacks on running app
+              Mitigation: OWASP ZAP DAST scanning
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    TRUST ZONE 6                             │
+│                    End Users                                │
+│                                                             │
+│   [HTTP requests to application]                            │
+│   [Untrusted input]                                         │
+└─────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════
+LEGEND:
+◄────► = Trust Boundary crossing point
+🔑     = Secret detection control
+🔍     = SAST control
+📦     = SCA control
+🐳     = Build control
+🛡️     = Container scan control
+🔏     = Signing control
+🌐     = DAST control
+═══════════════════════════════════════════════════════════════
