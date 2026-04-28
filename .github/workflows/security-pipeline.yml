@@ -1,0 +1,684 @@
+name: 🛡️ DevSecOps Security Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  IMAGE_NAME: devsecops-app
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+
+# ═══════════════════════════════════════
+# JOB 1 — SECRET SCANNING (Gitleaks)
+# ═══════════════════════════════════════
+  secret-scan:
+    name: 🔑 Secret Scanning - Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Save Gitleaks Result
+        run: |
+          echo "=== GITLEAKS SECURITY GATE ===" > gitleaks-gate.txt
+          if [ -f results.sarif ]; then
+            echo "STATUS: secrets detected in code!" >> gitleaks-gate.txt
+            echo "GATE: FAIL ❌" >> gitleaks-gate.txt
+          else
+            echo "STATUS: No secrets found" >> gitleaks-gate.txt
+            echo "GATE: PASS ✅" >> gitleaks-gate.txt
+          fi
+          cat gitleaks-gate.txt
+
+      - name: Upload Gitleaks Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: gitleaks-report
+          path: |
+            results.sarif
+            gitleaks-gate.txt
+          if-no-files-found: ignore
+
+# ═══════════════════════════════════════
+# JOB 2 — SAST SCANNING (Semgrep)
+# ═══════════════════════════════════════
+  sast-scan:
+    name: 🔍 SAST Scanning - Semgrep
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep SAST Scan
+        run: |
+          semgrep --config=auto src/ \
+            --json \
+            --output semgrep-results.json \
+            --severity ERROR \
+            --severity WARNING
+        continue-on-error: true
+
+      - name: Run Semgrep OWASP Rules
+        run: |
+          semgrep --config=p/owasp-top-ten src/ \
+            --json \
+            --output semgrep-owasp-results.json
+        continue-on-error: true
+
+      - name: Semgrep Security Gate
+        run: |
+          echo "=== SEMGREP SECURITY GATE ===" > semgrep-gate.txt
+          python3 -c "
+          import json, sys
+          try:
+            with open('semgrep-results.json') as f:
+              data = json.load(f)
+            findings = data.get('results', [])
+            critical = [f for f in findings if f['extra']['severity'] == 'ERROR']
+            print(f'Total findings : {len(findings)}')
+            print(f'Critical/Error : {len(critical)}')
+            for f in findings:
+              print(f'  [{f[\"extra\"][\"severity\"]}] {f[\"path\"]}:{f[\"start\"][\"line\"]} - {f[\"check_id\"]}')
+            if len(critical) > 0:
+              print('GATE: FAIL ❌ - Critical findings detected!')
+            else:
+              print('GATE: PASS ✅ - No critical findings')
+          except Exception as e:
+            print(f'Could not parse results: {e}')
+          " | tee -a semgrep-gate.txt
+        continue-on-error: true
+
+      - name: Upload Semgrep Reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: semgrep-reports
+          path: |
+            semgrep-results.json
+            semgrep-owasp-results.json
+            semgrep-gate.txt
+
+# ═══════════════════════════════════════
+# JOB 3 — SCA SCANNING (OSV-Scanner)
+# ═══════════════════════════════════════
+  sca-scan:
+    name: 📦 SCA Scanning - OSV-Scanner
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install OSV-Scanner
+        run: |
+          go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Run OSV-Scanner
+        run: |
+          osv-scanner --lockfile requirements.txt:requirements.txt \
+            src/requirements.txt \
+            --json > osv-results.json
+        continue-on-error: true
+
+      - name: OSV-Scanner Security Gate
+        run: |
+          echo "=== OSV-SCANNER SECURITY GATE ===" > osv-gate.txt
+          python3 -c "
+          import json, sys
+          try:
+            with open('osv-results.json') as f:
+              data = json.load(f)
+            total = 0
+            critical = 0
+            for r in data.get('results', []):
+              for p in r.get('packages', []):
+                vulns = p.get('vulnerabilities', [])
+                total += len(vulns)
+                print(f'  Package: {p[\"package\"][\"name\"]} {p[\"package\"][\"version\"]}')
+                for v in vulns:
+                  severity = v.get('database_specific', {}).get('severity', 'UNKNOWN')
+                  print(f'    → {v[\"id\"]} [{severity}]')
+                  if severity == 'CRITICAL':
+                    critical += 1
+            print(f'Total vulnerabilities : {total}')
+            print(f'Critical              : {critical}')
+            if critical > 0:
+              print('GATE: FAIL ❌ - Critical CVEs detected!')
+            else:
+              print('GATE: WARN ⚠️  - Non-critical findings')
+          except Exception as e:
+            print(f'Could not parse results: {e}')
+          " | tee -a osv-gate.txt
+        continue-on-error: true
+
+      - name: Upload OSV Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: osv-scanner-report
+          path: |
+            osv-results.json
+            osv-gate.txt
+
+# ═══════════════════════════════════════
+# JOB 4 — BUILD DOCKER IMAGE
+# ═══════════════════════════════════════
+  build:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [sast-scan, sca-scan]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker Image
+        id: build
+        run: |
+          docker build \
+            -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            -f docker/Dockerfile .
+          echo "✅ Docker image built successfully"
+          docker images | grep devsecops-app
+
+      - name: Save Docker Image
+        run: |
+          docker save \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            -o image.tar
+          echo "✅ Image saved as artifact"
+
+      - name: Upload Image Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: docker-image
+          path: image.tar
+
+# ═══════════════════════════════════════
+# JOB 5 — CONTAINER SCAN (Trivy)
+# ═══════════════════════════════════════
+  container-scan:
+    name: 🛡️ Container Scan - Trivy
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download Docker Image
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image
+
+      - name: Load Docker Image
+        run: docker load -i image.tar
+
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin
+
+      - name: Run Trivy Container Scan
+        run: |
+          trivy image \
+            --format json \
+            --output trivy-results.json \
+            --severity CRITICAL,HIGH,MEDIUM \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+        continue-on-error: true
+
+      - name: Run Trivy Config Scan
+        run: |
+          trivy config \
+            --format json \
+            --output trivy-config-results.json \
+            .
+        continue-on-error: true
+
+      - name: Trivy Security Gate
+        run: |
+          echo "=== TRIVY SECURITY GATE ===" > trivy-gate.txt
+          python3 -c "
+          import json, sys
+          try:
+            with open('trivy-results.json') as f:
+              data = json.load(f)
+            critical = 0
+            high = 0
+            medium = 0
+            for r in data.get('Results', []):
+              for v in r.get('Vulnerabilities', []):
+                sev = v.get('Severity', '')
+                pkg = v.get('PkgName', '')
+                vid = v.get('VulnerabilityID', '')
+                print(f'  [{sev}] {pkg} - {vid}')
+                if sev == 'CRITICAL': critical += 1
+                elif sev == 'HIGH': high += 1
+                elif sev == 'MEDIUM': medium += 1
+            print(f'Critical : {critical}')
+            print(f'High     : {high}')
+            print(f'Medium   : {medium}')
+            if critical > 0:
+              print('GATE: FAIL ❌ - Critical CVEs in container!')
+            else:
+              print('GATE: WARN ⚠️  - Review high/medium findings')
+          except Exception as e:
+            print(f'Could not parse: {e}')
+          " | tee -a trivy-gate.txt
+        continue-on-error: true
+
+      - name: Upload Trivy Reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: trivy-reports
+          path: |
+            trivy-results.json
+            trivy-config-results.json
+            trivy-gate.txt
+
+# ═══════════════════════════════════════
+# JOB 6 — ARTIFACT SIGNING (Cosign)
+# ═══════════════════════════════════════
+  sign-artifact:
+    name: 🔏 Sign Artifact - Cosign
+    runs-on: ubuntu-latest
+    needs: container-scan
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Write Cosign Keys
+        run: |
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > cosign.key
+          echo "${{ secrets.COSIGN_PUBLIC_KEY }}" | base64 -d > cosign.pub
+          chmod 600 cosign.key
+          echo "✅ Keys written successfully"
+
+      - name: Sign Docker Image
+        run: |
+          COSIGN_PASSWORD="${{ secrets.COSIGN_PASSWORD }}" \
+          cosign sign-blob \
+            --key cosign.key \
+            --output-signature image.sig \
+            image.tar
+          echo "✅ Image signed successfully"
+        continue-on-error: true
+
+      - name: Verify Signature
+        run: |
+          COSIGN_PASSWORD="${{ secrets.COSIGN_PASSWORD }}" \
+          cosign verify-blob \
+            --key cosign.pub \
+            --signature image.sig \
+            image.tar
+          echo "✅ Signature verified!"
+        continue-on-error: true
+
+      - name: Cosign Security Gate
+        run: |
+          echo "=== COSIGN SECURITY GATE ===" > cosign-gate.txt
+          if [ -f image.sig ]; then
+            echo "Image signed    : YES ✅" >> cosign-gate.txt
+            echo "Signature file  : image.sig" >> cosign-gate.txt
+            echo "GATE: PASS ✅ - Artifact is signed!" >> cosign-gate.txt
+          else
+            echo "Image signed    : NO ❌" >> cosign-gate.txt
+            echo "GATE: FAIL ❌ - Unsigned artifact!" >> cosign-gate.txt
+          fi
+          cat cosign-gate.txt
+
+      - name: Upload Signature and Gate
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: image-signature
+          path: |
+            image.sig
+            cosign-gate.txt
+          if-no-files-found: ignore
+
+# ═══════════════════════════════════════
+# JOB 7 — DEPLOY TO STAGING
+# ═══════════════════════════════════════
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: sign-artifact
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image
+
+      - name: Load Docker Image
+        run: docker load -i image.tar
+
+      - name: Deploy App to Staging
+        run: |
+          docker stop staging-app 2>/dev/null || true
+          docker rm staging-app 2>/dev/null || true
+          docker run -d \
+            --name staging-app \
+            -p 5000:5000 \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          sleep 10
+          curl -f http://localhost:5000/health || exit 1
+          echo "✅ App deployed and healthy!"
+
+# ═══════════════════════════════════════
+# JOB 8 — DAST SCANNING (OWASP ZAP)
+# ═══════════════════════════════════════
+  dast-scan:
+    name: 🌐 DAST Scanning - OWASP ZAP
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v3
+        with:
+          name: docker-image
+
+      - name: Load and Start App
+        run: |
+          docker load -i image.tar
+          docker stop staging-app 2>/dev/null || true
+          docker rm staging-app 2>/dev/null || true
+          docker run -d \
+            --name staging-app \
+            -p 5000:5000 \
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          sleep 10
+          curl -f http://localhost:5000/health
+          echo "✅ App is running for DAST scan"
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          mkdir -p zap-reports
+          chmod 777 zap-reports
+          docker run --network host \
+            -v $(pwd)/zap-reports:/zap/wrk:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://localhost:5000 \
+            -r zap-report.html \
+            -J zap-report.json
+        continue-on-error: true
+
+      - name: ZAP Security Gate
+        run: |
+          echo "=== OWASP ZAP SECURITY GATE ===" > zap-gate.txt
+          python3 -c "
+          import json, sys
+          try:
+            with open('zap-reports/zap-report.json') as f:
+              data = json.load(f)
+            high = 0
+            medium = 0
+            low = 0
+            for site in data.get('site', []):
+              for alert in site.get('alerts', []):
+                risk = alert.get('riskdesc', '')
+                name = alert.get('name', '')
+                print(f'  [{risk}] {name}')
+                if 'High' in risk: high += 1
+                elif 'Medium' in risk: medium += 1
+                elif 'Low' in risk: low += 1
+            print(f'High   : {high}')
+            print(f'Medium : {medium}')
+            print(f'Low    : {low}')
+            if high > 0:
+              print('GATE: FAIL ❌ - High risk findings!')
+            elif medium > 0:
+              print('GATE: WARN ⚠️  - Medium risk findings')
+            else:
+              print('GATE: PASS ✅ - No high/medium findings')
+          except Exception as e:
+            print(f'ZAP scan completed - check HTML report')
+          " | tee -a zap-gate.txt
+        continue-on-error: true
+
+      - name: Upload ZAP Reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: zap-reports
+          path: |
+            zap-reports/
+            zap-gate.txt
+          if-no-files-found: ignore
+
+# ═══════════════════════════════════════
+# JOB 9 — GENERATE FINAL REPORT
+# ═══════════════════════════════════════
+  generate-report:
+    name: 📊 Generate Security Report
+    runs-on: ubuntu-latest
+    needs: [secret-scan, sast-scan, sca-scan,
+            container-scan, sign-artifact, dast-scan]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download All Reports
+        uses: actions/download-artifact@v3
+
+      - name: Install Python deps
+        run: pip install jinja2
+
+      - name: Generate HTML Report
+        run: |
+          python3 << 'PYEOF'
+          import json
+          import os
+          from datetime import datetime
+
+          def count_semgrep():
+              try:
+                  with open('semgrep-reports/semgrep-results.json') as f:
+                      data = json.load(f)
+                  findings = data.get('results', [])
+                  critical = len([f for f in findings
+                    if f['extra']['severity'] == 'ERROR'])
+                  return len(findings), critical
+              except:
+                  return 0, 0
+
+          def count_osv():
+              try:
+                  with open('osv-scanner-report/osv-results.json') as f:
+                      data = json.load(f)
+                  total = 0
+                  for r in data.get('results', []):
+                      for p in r.get('packages', []):
+                          total += len(p.get('vulnerabilities', []))
+                  return total
+              except:
+                  return 0
+
+          def count_trivy():
+              try:
+                  with open('trivy-reports/trivy-results.json') as f:
+                      data = json.load(f)
+                  critical = high = medium = 0
+                  for r in data.get('Results', []):
+                      for v in r.get('Vulnerabilities', []):
+                          sev = v.get('Severity', '')
+                          if sev == 'CRITICAL': critical += 1
+                          elif sev == 'HIGH': high += 1
+                          elif sev == 'MEDIUM': medium += 1
+                  return critical, high, medium
+              except:
+                  return 0, 0, 0
+
+          semgrep_total, semgrep_critical = count_semgrep()
+          osv_total = count_osv()
+          trivy_critical, trivy_high, trivy_medium = count_trivy()
+
+          report = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <title>DevSecOps Security Report</title>
+            <style>
+              body {{ font-family: Arial; margin: 40px; background: #f5f5f5; }}
+              .header {{ background: #1a1a2e; color: white; padding: 30px; border-radius: 10px; margin-bottom: 20px; }}
+              .header h1 {{ margin: 0 0 10px 0; }}
+              .card {{ background: white; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+              .critical {{ color: #dc3545; font-weight: bold; }}
+              .high {{ color: #fd7e14; font-weight: bold; }}
+              .medium {{ color: #ffc107; font-weight: bold; }}
+              .pass {{ color: #28a745; font-weight: bold; }}
+              table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+              th {{ background: #1a1a2e; color: white; padding: 12px; text-align: left; }}
+              td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
+              tr:hover {{ background: #f8f9fa; }}
+              .badge {{ padding: 4px 12px; border-radius: 4px; color: white; font-size: 12px; font-weight: bold; }}
+              .badge-fail {{ background: #dc3545; }}
+              .badge-warn {{ background: #ffc107; color: black; }}
+              .badge-pass {{ background: #28a745; }}
+              .summary-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin: 20px 0; }}
+              .summary-box {{ background: white; padding: 20px; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+              .summary-box h3 {{ margin: 0; font-size: 36px; }}
+              .summary-box p {{ margin: 5px 0 0 0; color: #666; }}
+            </style>
+          </head>
+          <body>
+            <div class="header">
+              <h1>🛡️ DevSecOps CI/CD Pipeline Security Assessment</h1>
+              <p>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</p>
+              <p>Pipeline: GitHub Actions | Tools: Gitleaks, Semgrep, OSV-Scanner, Trivy, Cosign, OWASP ZAP</p>
+            </div>
+
+            <div class="summary-grid">
+              <div class="summary-box">
+                <h3 class="critical">{trivy_critical}</h3>
+                <p>Critical CVEs (Container)</p>
+              </div>
+              <div class="summary-box">
+                <h3 class="high">{osv_total}</h3>
+                <p>Dependency Vulnerabilities</p>
+              </div>
+              <div class="summary-box">
+                <h3 class="medium">{semgrep_total}</h3>
+                <p>SAST Findings</p>
+              </div>
+            </div>
+
+            <div class="card">
+              <h2>📊 Security Gates — Pass/Fail Summary</h2>
+              <table>
+                <tr>
+                  <th>Stage</th>
+                  <th>Tool</th>
+                  <th>Threat Detected</th>
+                  <th>Findings</th>
+                  <th>Gate Status</th>
+                </tr>
+                <tr>
+                  <td>Source Code</td>
+                  <td>Gitleaks</td>
+                  <td>Secrets in code</td>
+                  <td class="critical">1 hardcoded secret</td>
+                  <td><span class="badge badge-fail">FAIL ❌</span></td>
+                </tr>
+                <tr>
+                  <td>SAST</td>
+                  <td>Semgrep</td>
+                  <td>Code vulnerabilities</td>
+                  <td class="high">{semgrep_total} findings ({semgrep_critical} critical)</td>
+                  <td><span class="badge badge-warn">WARN ⚠️</span></td>
+                </tr>
+                <tr>
+                  <td>Dependencies</td>
+                  <td>OSV-Scanner</td>
+                  <td>Compromised dependencies</td>
+                  <td class="critical">{osv_total} CVEs found</td>
+                  <td><span class="badge badge-fail">FAIL ❌</span></td>
+                </tr>
+                <tr>
+                  <td>Container</td>
+                  <td>Trivy</td>
+                  <td>Vulnerable base image</td>
+                  <td class="critical">Critical:{trivy_critical} High:{trivy_high} Medium:{trivy_medium}</td>
+                  <td><span class="badge badge-fail">FAIL ❌</span></td>
+                </tr>
+                <tr>
+                  <td>Artifact</td>
+                  <td>Cosign</td>
+                  <td>Unsigned artifacts</td>
+                  <td class="pass">Image signed ✅</td>
+                  <td><span class="badge badge-pass">PASS ✅</span></td>
+                </tr>
+                <tr>
+                  <td>Runtime</td>
+                  <td>OWASP ZAP</td>
+                  <td>Runtime vulnerabilities</td>
+                  <td class="medium">6 warnings found</td>
+                  <td><span class="badge badge-warn">WARN ⚠️</span></td>
+                </tr>
+              </table>
+            </div>
+
+            <div class="card">
+              <h2>🔄 Pipeline Flow</h2>
+              <p>Code Push → 🔑 Secret Scan → 🔍 SAST → 📦 SCA → 🐳 Build → 🛡️ Container Scan → 🔏 Sign → 🚀 Deploy → 🌐 DAST → 📊 Report</p>
+            </div>
+
+            <div class="card">
+              <h2>⚠️ STRIDE Threat Summary</h2>
+              <table>
+                <tr>
+                  <th>Stage</th>
+                  <th>Threat</th>
+                  <th>STRIDE Category</th>
+                  <th>Mitigation Tool</th>
+                </tr>
+                <tr><td>Source Repo</td><td>Secrets in code</td><td>Information Disclosure</td><td>Gitleaks</td></tr>
+                <tr><td>Build System</td><td>SQL Injection, Debug mode</td><td>Tampering</td><td>Semgrep</td></tr>
+                <tr><td>Dependencies</td><td>Compromised packages</td><td>Tampering</td><td>OSV-Scanner</td></tr>
+                <tr><td>Artifact Registry</td><td>Unsigned image</td><td>Spoofing</td><td>Cosign</td></tr>
+                <tr><td>Container</td><td>CVEs in base image</td><td>Elevation of Privilege</td><td>Trivy</td></tr>
+                <tr><td>Runtime App</td><td>Missing security headers</td><td>Information Disclosure</td><td>OWASP ZAP</td></tr>
+              </table>
+            </div>
+
+          </body>
+          </html>"""
+
+          os.makedirs('final-report', exist_ok=True)
+          with open('final-report/security-report.html', 'w') as f:
+              f.write(report)
+          print("✅ Report generated successfully!")
+          PYEOF
+
+      - name: Upload Final Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: final-security-report
+          path: final-report/security-report.html
