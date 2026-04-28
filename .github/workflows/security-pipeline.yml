@@ -315,8 +315,8 @@ jobs:
 
       - name: Write Cosign Keys
         run: |
-          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > cosign.key
-          echo "${{ secrets.COSIGN_PUBLIC_KEY }}" | base64 -d > cosign.pub
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          echo "${{ secrets.COSIGN_PUBLIC_KEY }}" > cosign.pub
           chmod 600 cosign.key
           echo "✅ Keys written successfully"
 
