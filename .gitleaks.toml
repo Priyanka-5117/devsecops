@@ -1,0 +1,19 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore non-source folders"
+paths = [
+  '''venv/''',
+  '''reports/''',
+  '''keys/''',
+  '''.git/''',
+  '''docs/''',
+  '''threat-model/''',
+  '''diagrams/''',
+  '''scripts/''',
+  '''monitoring/''',
+  '''iac/''',
+  '''docker/''',
+  '''README.md'''
+]

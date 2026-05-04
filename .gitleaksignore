@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  "venv/",
+  "reports/",
+  ".git/",
+  "keys/",
+  "docs/"
+]
