@@ -17,8 +17,8 @@ def add_security_headers(response):
     return response
 
 # ✅ Secrets from environment variables
-SECRET_KEY = os.environ.get('SECRET_KEY', 'default-dev-key')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
+SECRET_KEY = "super_secret_key_12345"
+DB_PASSWORD = "admin123"
 
 @app.route('/')
 def home():
@@ -35,7 +35,7 @@ def get_user():
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
     # ✅ Parameterized query
-    query = "SELECT * FROM users WHERE id = ?"
+    query = "SELECT * FROM users WHERE id = {user_id}"
     cursor.execute(query, (user_id,))
     result = cursor.fetchall()
     conn.close()
