@@ -25,10 +25,11 @@ jobs:
           fetch-depth: 0
 
       - name: Run Gitleaks Secret Scan
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+  run: |
+    wget -q https://github.com/gitleaks/gitleaks/releases/download/v8.18.0/gitleaks_8.18.0_linux_x64.tar.gz
+    tar -xzf gitleaks_8.18.0_linux_x64.tar.gz
+    ./gitleaks detect --source ./src --no-git --verbose --exit-code 1
+  continue-on-error: false
 
       - name: Save Gitleaks Result
         run: |
@@ -73,14 +74,14 @@ jobs:
             --output semgrep-results.json \
             --severity ERROR \
             --severity WARNING
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Run Semgrep OWASP Rules
         run: |
           semgrep --config=p/owasp-top-ten src/ \
             --json \
             --output semgrep-owasp-results.json
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Semgrep Security Gate
         run: |
@@ -98,12 +99,13 @@ jobs:
               print(f'  [{f[\"extra\"][\"severity\"]}] {f[\"path\"]}:{f[\"start\"][\"line\"]} - {f[\"check_id\"]}')
             if len(critical) > 0:
               print('GATE: FAIL ❌ - Critical findings detected!')
+sys.exit(1)
             else:
               print('GATE: PASS ✅ - No critical findings')
           except Exception as e:
             print(f'Could not parse results: {e}')
           " | tee -a semgrep-gate.txt
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Upload Semgrep Reports
         uses: actions/upload-artifact@v4
@@ -369,8 +371,9 @@ jobs:
   deploy-staging:
     name: 🚀 Deploy to Staging
     runs-on: ubuntu-latest
-    continue-on-error: true
-    needs: sign-artifact
+    continue-on-error: false
+    needs: [secret-scan, sast-scan, sign-artifact]
+if: ${{ success() }}
     steps:
       - name: Download Docker Image
         uses: actions/download-artifact@v4
