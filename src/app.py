@@ -17,8 +17,9 @@ def add_security_headers(response):
     return response
 
 # ✅ Secrets from environment variables
-SECRET_KEY = "super_secret_key_12345"
-DB_PASSWORD = "admin123"
+# ❌ VULNERABILITY 1 — Hardcoded secrets (Gitleaks WILL catch these)
+SECRET_KEY = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ123456"
+DB_PASSWORD = "AKIAIOSFODNN7EXAMPLE"
 
 @app.route('/')
 def home():
